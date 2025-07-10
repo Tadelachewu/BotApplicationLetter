@@ -1,0 +1,6 @@
+python-dotenv
+requests
+pyTelegramBotAPI
+fpdf
+python-telegram-bot==13.15
+
