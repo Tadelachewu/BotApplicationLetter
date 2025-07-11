@@ -214,29 +214,25 @@ def finalize_letter(chat_id):
         user_data[chat_id] = {}
         user_progress[chat_id] = 0
 
+# === Bot Configuration ===
 def configure_bot():
-    """Configure the bot for the current environment"""
-    if ENVIRONMENT == "PRODUCTION":
-        print("⚙️ Configuring PRODUCTION environment (webhook)")
+    """Configure bot based on the environment"""
+    if ENVIRONMENT.upper() == "PRODUCTION":
+        print("⚙️ Configuring PRODUCTION (Webhook mode)")
         bot.remove_webhook()
-        bot.set_webhook(
-            url=f"{WEBHOOK_URL}/webhook",
-            # certificate=open('server.crt', 'r')  # Uncomment if using SSL
-        )
+        bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
     else:
-        print("⚙️ Configuring DEVELOPMENT environment (polling)")
+        print("⚙️ Configuring DEVELOPMENT (Polling mode)")
         bot.remove_webhook()
 
+# === Entry point ===
 if __name__ == '__main__':
-    print(f"🚀 Starting bot in {ENVIRONMENT} mode")
+    print(f"🚀 Starting bot in {ENVIRONMENT.upper()} mode")
     configure_bot()
-    
-    if ENVIRONMENT == "PRODUCTION":
-        app.run(
-            host="0.0.0.0",
-            port=int(os.getenv("PORT", 5000)),
-            # ssl_context=('server.crt', 'server.key')  # For HTTPS
-        )
+
+    if ENVIRONMENT.upper() == "PRODUCTION":
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port)
     else:
-        print("🤖 Bot is now polling for messages...")
+        print("🤖 Polling for updates...")
         bot.infinity_polling()
