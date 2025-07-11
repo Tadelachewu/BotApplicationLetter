@@ -1,59 +1,136 @@
+# letter_ai.py - Strict Guidelines Version
 import os
 import requests
-from dotenv import load_dotenv
 from datetime import datetime
 from fpdf import FPDF
+from dotenv import load_dotenv
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+class JobLetterPDF(FPDF):
+    """Professional PDF generator for job application letters"""
+    def __init__(self):
+        super().__init__()
+        self.set_auto_page_break(auto=True, margin=20)
+        self.set_margins(25, 15, 25)  # Left, Top, Right margins
+        self.set_font("Arial", size=12)
+        
+    def add_letter_content(self, content):
+        """Add properly formatted letter content"""
+        for line in content.split('\n'):
+            clean_line = line.strip()
+            if not clean_line:
+                self.ln(6)  # Space between paragraphs
+                continue
+            
+            # Handle encoding for Ethiopian characters if needed
+            try:
+                encoded_line = clean_line.encode('latin-1', 'replace').decode('latin-1')
+                self.multi_cell(0, 8, encoded_line)
+                self.ln(5)  # Slight space between lines
+            except:
+                self.multi_cell(0, 8, clean_line[:100])  # Fallback for problematic lines
+                self.ln(5)
 
 def generate_letter(user_input):
+    """
+    Generate a job application letter that strictly follows guidelines
+    Args:
+        user_input: Raw user data string
+    Returns:
+        str: Perfectly formatted letter or error message
+    """
     headers = {"Content-Type": "application/json"}
     today = datetime.today().strftime("%B %d, %Y")
+    
+    # STRICT PROMPT (as per guidelines)
+    prompt = f"""Generate a job application letter using EXACTLY these guidelines:
 
-    prompt = f"""
-You are a professional HR assistant.
-
-Write a clean, ready-to-send job application letter using the following applicant details:
-
+USER PROVIDED DETAILS:
 {user_input}
 
-Guidelines:
-- Do NOT include any placeholder text like [Date] or [Company Address, if unknown].
-- Use today's date: {today}.
-- Only include details actually provided. If company address or similar is missing, omit that line.
-- Format as a polished application letter — no section headers like "Contact Info", "Subject Line", or "Greeting".
-- Begin with sender's address, phone, email, and the current date, followed by the company's name and greeting.
-- Use professional tone and paragraph structure covering: interest in job, relevant skills/experience, motivation, and closing.
-- End with “Sincerely,” followed by the applicant’s full name.
+REQUIRED FORMAT:
+Name: [Full Name]
+Address:[Street Address] (if provided)
+City: [City] (if provided)
+Phone: [Phone] 
+Email: [Email]
+Date: {today}
 
-Make sure this looks exactly like a job letter ready to submit.
-"""
+To: [Company Name] (if provided)
+Company Address:[Company Address] (only if provided)
 
-    data = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
+Dear Hiring Manager,
+
+[1st Paragraph: Position and where found. Concise introduction.]
+
+[2nd Paragraph: Relevant experience with specific achievements.]
+
+[3rd Paragraph: Skills matching job requirements.]
+
+[4th Paragraph: Why interested in this company.]
+
+Sincerely,
+[Full Name]
+
+STRICT RULES:
+1. NEVER use placeholders like [Date] or [Company Address]
+2. ONLY include information actually provided
+3. Omit any missing sections completely
+4. Use professional business letter format
+5. Maintain 3-4 concise paragraphs
+6. Today's date must be: {today}
+7. Never add section headers
+8. make it attractive and eye-catchying
+9. make it exceptionally professional
+10. follow formats strictly
+11. Always end with "Sincerely," followed by full name"""
 
     try:
-        response = requests.post(GEMINI_URL, headers=headers, json=data)
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={os.getenv('GEMINI_API_KEY')}",
+            headers=headers,
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=20
+        )
         response.raise_for_status()
-        return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+        
+        generated_text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+        
+        # Validate the output meets guidelines
+        if "Dear Hiring Manager" not in generated_text or "Sincerely," not in generated_text:
+            raise ValueError("Generated letter doesn't follow required format")
+            
+        return generated_text
+        
     except Exception as e:
-        return f"❌ Error generating letter:\n{e}"
+        return f"❌ Strict Format Error: {str(e)}"
 
-
-def save_letter_as_pdf(letter_text, filename="Application_Letter.pdf"):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_font("Arial", size=12)
-
-    for line in letter_text.split('\n'):
-        pdf.multi_cell(0, 10, line.encode('latin-1', 'replace').decode('latin-1'))
-
-    os.makedirs("temp", exist_ok=True)
-    path = os.path.join("temp", filename)
-    pdf.output(path)
-    return path
+def save_letter_as_pdf(letter_text, filename="Job_Application.pdf"):
+    """
+    Create PDF that perfectly preserves letter formatting
+    Args:
+        letter_text: Pre-validated letter text
+        filename: Output filename
+    Returns:
+        str: Path to generated PDF
+    Raises:
+        Exception: If formatting would be compromised
+    """
+    try:
+        # Pre-check letter structure
+        if not all(x in letter_text for x in ["Dear Hiring Manager", "Sincerely,"]):
+            raise ValueError("Invalid letter structure - missing required components")
+        
+        pdf = JobLetterPDF()
+        pdf.add_page()
+        pdf.add_letter_content(letter_text)
+        
+        os.makedirs("letters", exist_ok=True)
+        pdf_path = os.path.join("letters", filename)
+        pdf.output(pdf_path)
+        
+        return pdf_path
+        
+    except Exception as e:
+        raise Exception(f"PDF Generation Aborted: {str(e)}")
