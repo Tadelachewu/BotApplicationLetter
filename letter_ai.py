@@ -57,7 +57,7 @@ Phone: [Phone]
 Email: [Email]
 Date: {today}
 
-To: [Company Name] (if provided)
+Company: [Company Name] (if provided)
 Company Address:[Company Address] (only if provided)
 
 Dear Hiring Manager,

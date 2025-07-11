@@ -1,94 +1,218 @@
-# app.py - Dual Mode Telegram Bot (Webhook & Polling)
-import os
-import re
+# app.py - Telegram Bot with Multilingual, SQLite Storage & Web Dashboard
+
+import os, re, time, threading, logging, sqlite3
 from flask import Flask, request, jsonify
 import telebot
 from dotenv import load_dotenv
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from letter_ai import generate_letter, save_letter_as_pdf
+from datetime import datetime, timezone
 
-# Load environment variables
+# Load environment
 load_dotenv()
-
-# Configuration
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "DEVELOPMENT").upper()
+if not BOT_TOKEN or (ENVIRONMENT == "PRODUCTION" and not WEBHOOK_URL):
+    raise ValueError("Required environment variables are missing")
 
-# Validate configuration
-if not BOT_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN is required")
-if ENVIRONMENT == "PRODUCTION" and not WEBHOOK_URL:
-    raise ValueError("WEBHOOK_URL is required in production")
-
-# Initialize Flask and Bot
+# Initialize
 app = Flask(__name__)
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# User session management
+# Setup SQLite
+conn = sqlite3.connect('bot_data.db', check_same_thread=False)
+c = conn.cursor()
+c.execute('''CREATE TABLE IF NOT EXISTS letters (chat_id INTEGER, full_name TEXT, timestamp TEXT, letter TEXT)''')
+c.execute('''CREATE TABLE IF NOT EXISTS feedback (chat_id INTEGER, timestamp TEXT, feedback TEXT)''')
+conn.commit()
+
+# Session storage
 user_data = {}
 user_progress = {}
 
-# Conversation flow
-steps = [
-    "full_name", "address", "phone", "email", "job_title", "company_name",
-    "experience", "achievements", "skills", "job_platform", "company_reason"
-]
+# Logging
+logging.basicConfig(level=logging.INFO, filename="bot.log", format="%(asctime)s - %(message)s")
 
-questions = {
-    "full_name": "📝 What is your **full name**?",
-    "address": "🏠 What is your **address**?",
-    "phone": "📱 What is your **phone number**?",
-    "email": "📧 What is your **email address**?",
-    "job_title": "💼 What **job title** are you applying for?",
-    "company_name": "🏢 What is the **company name**?",
-    "experience": "⌛ How many years of experience and in what field?",
-    "achievements": "🏆 Mention 1-2 achievements (with numbers if possible):",
-    "skills": "🛠️ List your top 3-5 skills:",
-    "job_platform": "🌐 Where did you find the job (e.g., LinkedIn, Effoysira)?",
-    "company_reason": "💡 Why do you want to work for this company?"
+# Languages and questions
+LANGUAGES = ["English", "Amharic"]
+lang_questions = {
+    "English": {
+        "full_name": "📝 What is your **full name**?",
+        "address": "🏠 What is your **address**?",
+        "phone": "📱 What is your **phone number**?",
+        "email": "📧 What is your **email address**?",
+        "job_title": "💼 What **job title** are you applying for?",
+        "company_name": "🏢 What is the **company name**?",
+        "experience": "⌛ How many years of experience and in what field?",
+        "achievements": "🏆 Mention 1-2 achievements (with numbers if possible):",
+        "skills": "🛠️ List your top 3-5 skills:",
+        "job_platform": "🌐 Where did you find the job?",
+        "company_reason": "💡 Why do you want to work for this company?"
+    },
+    "Amharic": {
+        "full_name": "📝 ሙሉ ስምዎን ያስገቡ።",
+        "address": "🏠 አድራሻዎን ያስገቡ።",
+        "phone": "📱 የስልክ ቁጥርዎን ያስገቡ።",
+        "email": "📧 ኢሜል አድራሻዎን ያስገቡ።",
+        "job_title": "💼 ስራ መደበኛውን ርዕስ ያስገቡ።",
+        "company_name": "🏢 የኩባንያው ስም ያስገቡ።",
+        "experience": "⌛ ምን ዓመት ልምድ አለዎት?",
+        "achievements": "🏆 አንድ ወይም ሁለት ስኬቶችን ያስግቡ።",
+        "skills": "🛠️ 3-5 ክህሎትዎችን ያስገቡ።",
+        "job_platform": "🌐 ስራውን ከየት ተገኘው?",
+        "company_reason": "💡 ከለምነት ለምን ትጠብቃላችሁ?"
+    }
 }
+steps = list(lang_questions["English"].keys())
 
-# Webhook routes
+# Reusable Enhancements
+def schedule_clear_session(chat_id, delay=600):
+    def clear():
+        time.sleep(delay)
+        user_data.pop(chat_id, None)
+        user_progress.pop(chat_id, None)
+        logging.info(f"Session cleared for {chat_id}")
+    threading.Thread(target=clear).start()
+
+def get_post_letter_buttons(lang):
+    kb = InlineKeyboardMarkup()
+    texts = {"English": ("🔄 Restart", "💬 Feedback"), "Amharic": ("🔄 ጀምር ሁልቱ", "💬 አስተያየት")}
+    kb.add(InlineKeyboardButton(texts[lang][0], callback_data="restart"),
+           InlineKeyboardButton(texts[lang][1], callback_data="feedback"))
+    return kb
+
+# Routes
 @app.route('/')
-def health_check():
+def health():
     return jsonify({"status": "healthy", "mode": ENVIRONMENT})
+
+@app.route('/dashboard/letters')
+def dashboard_letters():
+    rows = c.execute("SELECT * FROM letters ORDER BY timestamp DESC").fetchall()
+    html = "<h1>Saved Letters</h1><ul>"
+    for chat_id, name, ts, let in rows:
+        html += f"<li>{ts} – {name}:<pre>{let[:200]}...</pre></li>"
+    return html
+
+@app.route('/dashboard/feedback')
+def dashboard_feedback(): 
+    rows = c.execute("SELECT * FROM feedback ORDER BY timestamp DESC").fetchall()
+    html = "<h1>User Feedback</h1><ul>"
+    for chat, ts, fb in rows:
+        html += f"<li>{ts} – chat {chat}: {fb}</li>"
+    return html
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
+        u = telebot.types.Update.de_json(request.get_data().decode())
+        bot.process_new_updates([u])
         return '', 200
     return 'Bad request', 400
 
-# Bot command handlers
+# Handlers
 @bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    chat_id = message.chat.id
-    user_progress[chat_id] = 0
-    user_data[chat_id] = {}
-    bot.send_message(
-        chat_id,
-        "👋 Welcome! I'll help you generate a job application letter.\n\n"
-        "Type /start to begin or /reset at any time to start over."
-    )
-    ask_next(chat_id)
+def cmd_start(message):
+    cid = message.chat.id
+    user_data[cid] = {"language": None}
+    user_progress[cid] = -1
+    options = "\n".join([f"{i+1}. {l}" for i, l in enumerate(LANGUAGES)])
+    bot.send_message(cid, f"Choose language / ቋንቋ ይምረጡ:\n{options}")
 
 @bot.message_handler(commands=['reset'])
-def reset_conversation(message):
-    chat_id = message.chat.id
-    user_progress[chat_id] = 0
-    user_data[chat_id] = {}
-    bot.send_message(chat_id, "🔄 Conversation reset. Type /start to begin.")
+def cmd_reset(message):
+    cid = message.chat.id
+    user_data[cid] = {"language": None}
+    user_progress[cid] = -1
+    bot.send_message(cid, "🔄 Restarted. Type /start")    
 
-def ask_next(chat_id):
-    step = user_progress.get(chat_id, 0)
-    if step < len(steps):
-        key = steps[step]
-        bot.send_message(chat_id, questions[key], parse_mode="Markdown")
+@bot.message_handler(commands=['feedback'])
+def cmd_feedback(message):
+    cid = message.chat.id
+    user_data[cid]['awaiting_feedback'] = True
+    bot.send_message(cid, "💬 Please type your feedback.")
+
+@bot.message_handler(commands=['edit'])
+def cmd_edit(message):
+    cid = message.chat.id
+    if cid not in user_data or not user_data[cid].get('responses'):
+        bot.send_message(cid, "⚠️ No data to edit. Start with /start.")
+        return
+    user_progress[cid] = "editing"
+    options = "\n".join(f"- `{s}`" for s in steps)
+    bot.send_message(cid, f"Select field to edit:\n{options}", parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: True)
+def cb_handler(call):
+    cid = call.message.chat.id
+    lang = user_data[cid].get('language', 'English')
+    if call.data == "restart":
+        cmd_reset(call.message)
+    elif call.data == "feedback":
+        cmd_feedback(call.message)
+
+# Message handling
+@bot.message_handler(func=lambda m: True)
+def msg_handler(msg):
+    cid = msg.chat.id
+    txt = msg.text.strip()
+    state = user_progress.get(cid)
+
+    # feedback
+    if user_data.get(cid, {}).get('awaiting_feedback'):
+        timestamp = datetime.now(timezone.utc).isoformat()
+        c.execute("INSERT INTO feedback VALUES (?,?,?)", (cid, timestamp, txt))
+        conn.commit()
+        user_data[cid]['awaiting_feedback'] = False
+        bot.send_message(cid, "🙏 Thank you for your feedback!")
+        return
+
+    # language selection
+    if state == -1:
+        idx = int(txt) - 1 if txt.isdigit() else -1
+        if 0 <= idx < len(LANGUAGES):
+            lang = LANGUAGES[idx]
+            user_data[cid]['language'] = lang
+            user_data[cid]['responses'] = {}
+            user_progress[cid] = 0
+            ask_next(cid)
+        else:
+            bot.send_message(cid, "⚠️ Invalid choice. Please choose 1 or 2.")
+        return
+
+    # editing
+    if state == "editing":
+        if txt not in steps:
+            bot.send_message(cid, "⚠️ Invalid field.")
+            return
+        user_progress[cid] = steps.index(txt)
+        bot.send_message(cid, f"✏️ Enter new value for `{txt}`", parse_mode="Markdown")
+        return
+
+    # normal question flow
+    if isinstance(state, int) and state < len(steps):
+        lang = user_data[cid]['language']
+        key = steps[state]
+        # validate
+        is_valid, err = validate_input(key, txt)
+        if not is_valid:
+            bot.send_message(cid, f"⚠️ {err}")
+            return
+        user_data[cid]['responses'][key] = txt
+        user_progress[cid] += 1
+        ask_next(cid)
+        return
+
+# ask_next
+def ask_next(cid):
+    lang = user_data[cid]['language']
+    idx = user_progress[cid]
+    if idx < len(steps):
+        key = steps[idx]
+        bot.send_message(cid, lang_questions[lang][key], parse_mode="Markdown")
     else:
-        finalize_letter(chat_id)
+        finalize_letter(cid)
 
 # Input validation
 def validate_input(step, text):
@@ -144,79 +268,44 @@ def validate_input(step, text):
     is_valid, error_msg = validations.get(step, (True, ""))
     return is_valid, error_msg if not is_valid else ""
 
-@bot.message_handler(func=lambda m: True)
-def handle_message(message):
-    chat_id = message.chat.id
-    
-    if chat_id not in user_progress:
-        bot.send_message(chat_id, "❗ Please type /start to begin.")
-        return
 
-    step_index = user_progress[chat_id]
-    if step_index >= len(steps):
-        return
+# finalize_letter
+def finalize_letter(cid):
+    lang = user_data[cid]['language']
+    resp = user_data[cid]['responses']
+    prompt = "\n".join(f"{k.replace('_', ' ').title()}: {v}" for k,v in resp.items())
 
-    key = steps[step_index]
-    text = message.text.strip()
-
-    is_valid, error_msg = validate_input(key, text)
-    if not is_valid:
-        bot.send_message(chat_id, f"⚠️ {error_msg}")
-        return
-
-    user_data[chat_id][key] = text
-    user_progress[chat_id] += 1
-    ask_next(chat_id)
-
-def finalize_letter(chat_id):
-    inputs = user_data[chat_id]
-    
-    # Format the prompt more clearly
-    prompt = "\n".join([
-        f"Name: {inputs.get('full_name', '')}",
-        f"Address: {inputs.get('address', '')}",
-        f"Phone: {inputs.get('phone', '')}",
-        f"Email: {inputs.get('email', '')}",
-        f"Applying for: {inputs.get('job_title', '')} at {inputs.get('company_name', '')}",
-        f"Experience: {inputs.get('experience', '')}",
-        f"Achievements: {inputs.get('achievements', '')}",
-        f"Skills: {inputs.get('skills', '')}",
-        f"Found on: {inputs.get('job_platform', '')}",
-        f"Reason for applying: {inputs.get('company_reason', '')}"
-    ])
-    
     try:
-        bot.send_chat_action(chat_id, 'typing')
-        letter_text = generate_letter(prompt)
-        
-        if letter_text.startswith("❌ Error"):
-            raise Exception(letter_text)
-            
-        # Send text version first
-        bot.send_message(chat_id, f"✉️ Here's your application letter:\n\n{letter_text}")
-        
-        # Then send PDF
-        pdf_filename = f"{inputs['full_name'].replace(' ', '_')}_Application.pdf"
-        pdf_path = save_letter_as_pdf(letter_text, pdf_filename)
-        
-        with open(pdf_path, 'rb') as pdf_file:
-            bot.send_document(chat_id, pdf_file, caption="📄 PDF Version")
-            
+        bot.send_chat_action(cid, 'typing')
+        letter = generate_letter(prompt)
+        if letter.startswith("❌"): raise Exception(letter)
+        bot.send_message(cid, f"✉️ {letter}")
+        pdfname = f"{resp['full_name'].replace(' ','_')}_App.pdf"
+        path = save_letter_as_pdf(letter, pdfname)
+        with open(path,'rb') as f:
+            bot.send_document(cid, f, caption="📄 PDF")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        # save letter
+        c.execute("INSERT INTO letters VALUES(?,?,?,?)",
+                  (cid, resp['full_name'], timestamp, letter))
+        conn.commit()
+
+        bot.send_message(cid, "✅ Next?", reply_markup=get_post_letter_buttons(lang))
+        schedule_clear_session(cid)
+        logging.info(f"Letter saved for {resp['full_name']}")
+
     except Exception as e:
-        bot.send_message(
-            chat_id,
-            "⚠️ Sorry, we encountered an error generating your letter.\n"
-            f"Technical details: {str(e)[:200]}\n\n"
-            "Please try again or contact support."
-        )
+        bot.send_message(cid, f"⚠️ Error generating letter: {str(e)[:200]}")
+        logging.error(str(e))
     finally:
-        # Reset conversation
-        user_data[chat_id] = {}
-        user_progress[chat_id] = 0
+        user_data[cid] = {"language": lang, "responses": {}}
+        user_progress[cid] = 0
+
+# Bot config and start...
+
 
 # === Bot Configuration ===
 def configure_bot():
-    """Configure bot based on the environment"""
     if ENVIRONMENT.upper() == "PRODUCTION":
         print("⚙️ Configuring PRODUCTION (Webhook mode)")
         bot.remove_webhook()
