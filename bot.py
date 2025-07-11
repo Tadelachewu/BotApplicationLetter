@@ -102,7 +102,7 @@ def dashboard_feedback():
     for chat, ts, fb in rows:
         html += f"<li>{ts} – chat {chat}: {fb}</li>"
     return html
-
+#bind this https://botapplicationletter.onrender.com/webhook  on deployed server as .env
 @app.route('/webhook', methods=['POST'])
 def webhook():
     if request.headers.get('content-type') == 'application/json':
