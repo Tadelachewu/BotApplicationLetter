@@ -1,11 +1,16 @@
 # letter_ai.py - Strict Guidelines Version
 import os
 import requests
+import time
+import random
 from datetime import datetime
 from fpdf import FPDF
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+# Load .env values from this project and override any stale OS env vars
+_dotenv_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=_dotenv_path, override=True)
 
 class JobLetterPDF(FPDF):
     """Professional PDF generator for job application letters"""
@@ -86,25 +91,63 @@ STRICT RULES:
 10. follow formats strictly
 11. Always end with "Sincerely," followed by full name"""
 
-    try:
-        response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={os.getenv('GEMINI_API_KEY')}",
-            headers=headers,
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=20
-        )
-        response.raise_for_status()
-        
-        generated_text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-        
-        # Validate the output meets guidelines
-        if "Dear Hiring Manager" not in generated_text or "Sincerely," not in generated_text:
-            raise ValueError("Generated letter doesn't follow required format")
-            
-        return generated_text
-        
-    except Exception as e:
-        return f"❌ Strict Format Error: {str(e)}"
+    api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    if not api_key:
+        return "❌ Strict Format Error: GEMINI_API_KEY is not set in the environment"
+    if api_key.lower() in {"your_gemini_api_key_here", "your_api_key_here"}:
+        return "❌ Strict Format Error: GEMINI_API_KEY is still a placeholder. Update and save .env"
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        f"?key={api_key}"
+    )
+
+    max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "5"))
+    backoff_cap = int(os.getenv("GEMINI_BACKOFF_CAP_SECONDS", "60"))
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=20,
+            )
+
+            if response.status_code == 429:
+                if attempt == max_retries:
+                    return (
+                        f"❌ Strict Format Error: 429 Too Many Requests after {max_retries} attempts. "
+                        "This usually means your API key hit a rate/quota limit; wait a bit or increase quota."
+                    )
+
+                retry_after = response.headers.get("Retry-After")
+                if retry_after and retry_after.isdigit():
+                    wait = min(backoff_cap, int(retry_after))
+                else:
+                    # Jittered exponential backoff
+                    wait = min(backoff_cap, (2 ** attempt) + random.uniform(0.0, 1.0))
+
+                print(f"429 from Gemini. Retrying after {wait:.1f}s (attempt {attempt}/{max_retries})")
+                time.sleep(wait)
+                continue
+
+            response.raise_for_status()
+
+            generated_text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+            # Validate the output meets guidelines
+            if "Dear Hiring Manager" not in generated_text or "Sincerely," not in generated_text:
+                return "❌ Strict Format Error: Generated letter doesn't follow required format"
+
+            return generated_text
+
+        except requests.exceptions.RequestException as e:
+            if attempt == max_retries:
+                return f"❌ Strict Format Error: {str(e)}"
+            # wait briefly before retrying on transient network errors
+            time.sleep(min(backoff_cap, 2 ** attempt))
+            continue
 
 def save_letter_as_pdf(letter_text, filename="Job_Application.pdf"):
     """

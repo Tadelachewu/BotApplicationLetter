@@ -1,20 +1,30 @@
 # app.py - Telegram Bot with Multilingual, SQLite Storage & Web Dashboard
 
-import os, re, time, threading, logging, sqlite3
+import os, re, time, threading, logging, sqlite3, json
 from flask import Flask, request, jsonify
 import telebot
 from dotenv import load_dotenv
+from pathlib import Path
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from letter_ai import generate_letter, save_letter_as_pdf
 from datetime import datetime, timezone
 
-# Load environment
-load_dotenv()
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+# Load environment from this project (override any stale OS env vars)
+_dotenv_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=_dotenv_path, override=True)
+BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+WEBHOOK_URL = (os.getenv("WEBHOOK_URL") or "").strip()
 ENVIRONMENT = os.getenv("ENVIRONMENT", "DEVELOPMENT").upper()
+if BOT_TOKEN.lower() == "your_telegram_bot_token_here":
+    raise ValueError("TELEGRAM_BOT_TOKEN is still the placeholder. Update and save .env, then restart.")
 if not BOT_TOKEN or (ENVIRONMENT == "PRODUCTION" and not WEBHOOK_URL):
     raise ValueError("Required environment variables are missing")
+
+# Basic token sanity check to avoid starting polling with an invalid token
+import re as _re
+_token_valid = bool(_re.match(r"^\d+:[-\w]+$", BOT_TOKEN))
+if not _token_valid:
+    print("⚠️ TELEGRAM_BOT_TOKEN looks invalid or missing. Bot will not start polling.")
 
 # Initialize
 app = Flask(__name__)
@@ -25,11 +35,46 @@ conn = sqlite3.connect('bot_data.db', check_same_thread=False)
 c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS letters (chat_id INTEGER, full_name TEXT, timestamp TEXT, letter TEXT)''')
 c.execute('''CREATE TABLE IF NOT EXISTS feedback (chat_id INTEGER, timestamp TEXT, feedback TEXT)''')
+c.execute('''CREATE TABLE IF NOT EXISTS sessions (
+    chat_id INTEGER PRIMARY KEY,
+    language TEXT,
+    progress INTEGER,
+    responses TEXT,
+    updated_at TEXT
+)''')
 conn.commit()
 
 # Session storage
 user_data = {}
 user_progress = {}
+def load_session(chat_id):
+    row = c.execute(
+        "SELECT language, progress, responses FROM sessions WHERE chat_id=?",
+        (chat_id,),
+    ).fetchone()
+    if not row:
+        return None
+    language, progress, responses_json = row
+    try:
+        responses = json.loads(responses_json) if responses_json else {}
+    except Exception:
+        responses = {}
+    return {"language": language, "progress": int(progress), "responses": responses}
+
+
+def save_session(chat_id, language, progress, responses):
+    timestamp = datetime.now(timezone.utc).isoformat()
+    c.execute(
+        "REPLACE INTO sessions(chat_id, language, progress, responses, updated_at) VALUES (?,?,?,?,?)",
+        (chat_id, language, int(progress), json.dumps(responses, ensure_ascii=False), timestamp),
+    )
+    conn.commit()
+
+
+def delete_session(chat_id):
+    c.execute("DELETE FROM sessions WHERE chat_id=?", (chat_id,))
+    conn.commit()
+
 
 # Logging
 logging.basicConfig(level=logging.INFO, filename="bot.log", format="%(asctime)s - %(message)s")
@@ -72,6 +117,7 @@ def schedule_clear_session(chat_id, delay=600):
         time.sleep(delay)
         user_data.pop(chat_id, None)
         user_progress.pop(chat_id, None)
+        delete_session(chat_id)
         logging.info(f"Session cleared for {chat_id}")
     threading.Thread(target=clear).start()
 
@@ -81,6 +127,54 @@ def get_post_letter_buttons(lang):
     kb.add(InlineKeyboardButton(texts[lang][0], callback_data="restart"),
            InlineKeyboardButton(texts[lang][1], callback_data="feedback"))
     return kb
+
+
+def get_retry_buttons(lang):
+    kb = InlineKeyboardMarkup()
+    texts = {
+        "English": ("🔁 Retry", "🔄 Restart"),
+        "Amharic": ("🔁 ደግመው ሞክር", "🔄 ጀምር ሁልቱ"),
+    }
+    kb.add(
+        InlineKeyboardButton(texts[lang][0], callback_data="retry"),
+        InlineKeyboardButton(texts[lang][1], callback_data="restart"),
+    )
+    return kb
+
+
+def get_edit_buttons(lang, responses):
+    kb = InlineKeyboardMarkup()
+    # Show only fields that have been answered
+    for step in steps:
+        if step in (responses or {}):
+            label = step.replace('_', ' ').title()
+            kb.add(InlineKeyboardButton(f"✏️ {label}", callback_data=f"edit:{step}"))
+    cancel_text = "❌ Cancel" if lang == "English" else "❌ ተወው"
+    kb.add(InlineKeyboardButton(cancel_text, callback_data="edit_cancel"))
+    return kb
+
+
+def compute_next_progress(responses):
+    responses = responses or {}
+    idx = 0
+    while idx < len(steps) and steps[idx] in responses and str(responses[steps[idx]]).strip():
+        idx += 1
+    return idx
+
+
+def retry_generation(cid):
+    # Prefer in-memory session, else load from DB
+    if cid not in user_data or not user_data[cid].get('responses'):
+        sess = load_session(cid)
+        if not sess or not sess.get('responses'):
+            bot.send_message(cid, "⚠️ No saved session to retry. Type /start")
+            return
+        user_data[cid] = {"language": sess.get("language", "English"), "responses": sess.get("responses", {})}
+        user_progress[cid] = sess.get("progress", 0)
+
+    # Mark as completed so finalize runs
+    user_progress[cid] = len(steps)
+    finalize_letter(cid)
 
 # Routes
 @app.route('/')
@@ -115,6 +209,18 @@ def webhook():
 @bot.message_handler(commands=['start', 'help'])
 def cmd_start(message):
     cid = message.chat.id
+    sess = load_session(cid)
+    if sess and sess.get("language") in LANGUAGES and isinstance(sess.get("progress"), int):
+        user_data[cid] = {"language": sess["language"], "responses": sess.get("responses", {})}
+        user_progress[cid] = sess["progress"]
+        # Resume: ask next question or allow retry if already completed
+        if user_progress[cid] < len(steps):
+            bot.send_message(cid, "✅ Restored your previous session. Continuing…")
+            ask_next(cid)
+        else:
+            bot.send_message(cid, "✅ Restored your previous session. Use /retry to generate the letter again, or /edit to change something.")
+        return
+
     user_data[cid] = {"language": None}
     user_progress[cid] = -1
     options = "\n".join([f"{i+1}. {l}" for i, l in enumerate(LANGUAGES)])
@@ -125,7 +231,14 @@ def cmd_reset(message):
     cid = message.chat.id
     user_data[cid] = {"language": None}
     user_progress[cid] = -1
+    delete_session(cid)
     bot.send_message(cid, "🔄 Restarted. Type /start")    
+
+
+@bot.message_handler(commands=['retry'])
+def cmd_retry(message):
+    cid = message.chat.id
+    retry_generation(cid)
 
 @bot.message_handler(commands=['feedback'])
 def cmd_feedback(message):
@@ -136,12 +249,24 @@ def cmd_feedback(message):
 @bot.message_handler(commands=['edit'])
 def cmd_edit(message):
     cid = message.chat.id
+    # Restore from DB if needed
     if cid not in user_data or not user_data[cid].get('responses'):
-        bot.send_message(cid, "⚠️ No data to edit. Start with /start.")
+        sess = load_session(cid)
+        if sess and sess.get('responses'):
+            user_data[cid] = {"language": sess.get("language", "English"), "responses": sess.get("responses", {})}
+            user_progress[cid] = sess.get("progress", compute_next_progress(user_data[cid]['responses']))
+
+    if cid not in user_data or not user_data[cid].get('responses'):
+        bot.send_message(cid, "⚠️ No saved data to edit. Start with /start.")
         return
+
+    lang = user_data[cid].get('language', 'English')
     user_progress[cid] = "editing"
-    options = "\n".join(f"- `{s}`" for s in steps)
-    bot.send_message(cid, f"Select field to edit:\n{options}", parse_mode="Markdown")
+    bot.send_message(
+        cid,
+        "Select a field to edit:",
+        reply_markup=get_edit_buttons(lang, user_data[cid].get('responses', {})),
+    )
 
 @bot.callback_query_handler(func=lambda call: True)
 def cb_handler(call):
@@ -151,6 +276,19 @@ def cb_handler(call):
         cmd_reset(call.message)
     elif call.data == "feedback":
         cmd_feedback(call.message)
+    elif call.data == "retry":
+        retry_generation(cid)
+    elif call.data == "edit_cancel":
+        user_data.setdefault(cid, {}).pop('editing_field', None)
+        bot.send_message(cid, "✅ Edit cancelled.")
+    elif call.data.startswith("edit:"):
+        field = call.data.split(":", 1)[1]
+        if field not in steps:
+            bot.send_message(cid, "⚠️ Invalid field.")
+            return
+        user_data.setdefault(cid, {})['editing_field'] = field
+        user_progress[cid] = "editing_value"
+        bot.send_message(cid, f"✏️ Enter new value for `{field}`", parse_mode="Markdown")
 
 # Message handling
 @bot.message_handler(func=lambda m: True)
@@ -158,6 +296,14 @@ def msg_handler(msg):
     cid = msg.chat.id
     txt = msg.text.strip()
     state = user_progress.get(cid)
+
+    # If bot restarted and memory is empty, restore from DB
+    if state is None:
+        sess = load_session(cid)
+        if sess and sess.get("language") in LANGUAGES:
+            user_data[cid] = {"language": sess["language"], "responses": sess.get("responses", {})}
+            user_progress[cid] = sess.get("progress", -1)
+            state = user_progress.get(cid)
 
     # feedback
     if user_data.get(cid, {}).get('awaiting_feedback'):
@@ -176,17 +322,46 @@ def msg_handler(msg):
             user_data[cid]['language'] = lang
             user_data[cid]['responses'] = {}
             user_progress[cid] = 0
+            save_session(cid, lang, user_progress[cid], user_data[cid]['responses'])
             ask_next(cid)
         else:
             bot.send_message(cid, "⚠️ Invalid choice. Please choose 1 or 2.")
         return
 
+    # editing value entry (works for both inline edit buttons and typed-field edit)
+    if user_data.get(cid, {}).get('editing_field'):
+        lang = user_data[cid].get('language', 'English')
+        field = user_data[cid]['editing_field']
+        is_valid, err = validate_input(field, txt)
+        if not is_valid:
+            bot.send_message(cid, f"⚠️ {err}")
+            return
+
+        user_data[cid].setdefault('responses', {})[field] = txt
+        user_data[cid].pop('editing_field', None)
+
+        next_idx = compute_next_progress(user_data[cid]['responses'])
+        user_progress[cid] = next_idx if next_idx < len(steps) else len(steps)
+        save_session(cid, lang, user_progress[cid], user_data[cid]['responses'])
+
+        if next_idx < len(steps):
+            bot.send_message(cid, "✅ Updated. Continuing…")
+            ask_next(cid)
+        else:
+            bot.send_message(
+                cid,
+                "✅ Updated. Tap Retry to generate again, or /edit to change more.",
+                reply_markup=get_retry_buttons(lang),
+            )
+        return
+
     # editing
     if state == "editing":
         if txt not in steps:
-            bot.send_message(cid, "⚠️ Invalid field.")
+            bot.send_message(cid, "⚠️ Invalid field. Use the buttons or type a valid field key.")
             return
-        user_progress[cid] = steps.index(txt)
+        user_data[cid]['editing_field'] = txt
+        user_progress[cid] = "editing_value"
         bot.send_message(cid, f"✏️ Enter new value for `{txt}`", parse_mode="Markdown")
         return
 
@@ -201,6 +376,7 @@ def msg_handler(msg):
             return
         user_data[cid]['responses'][key] = txt
         user_progress[cid] += 1
+        save_session(cid, lang, user_progress[cid], user_data[cid]['responses'])
         ask_next(cid)
         return
 
@@ -291,15 +467,24 @@ def finalize_letter(cid):
         conn.commit()
 
         bot.send_message(cid, "✅ Next?", reply_markup=get_post_letter_buttons(lang))
+        # Success: session can be cleared
+        delete_session(cid)
         schedule_clear_session(cid)
         logging.info(f"Letter saved for {resp['full_name']}")
 
     except Exception as e:
         bot.send_message(cid, f"⚠️ Error generating letter: {str(e)[:200]}")
+        bot.send_message(
+            cid,
+            "✅ Your answers are saved. Tap Retry to try again, or use /edit to change something.",
+            reply_markup=get_retry_buttons(lang),
+        )
         logging.error(str(e))
     finally:
-        user_data[cid] = {"language": lang, "responses": {}}
-        user_progress[cid] = 0
+        # Keep state after failure; only reset on success or /reset
+        user_data[cid] = {"language": lang, "responses": resp}
+        user_progress[cid] = len(steps)
+        save_session(cid, lang, user_progress[cid], resp)
 
 # Bot config and start...
 
@@ -308,11 +493,17 @@ def finalize_letter(cid):
 def configure_bot():
     if ENVIRONMENT.upper() == "PRODUCTION":
         print("⚙️ Configuring PRODUCTION (Webhook mode)")
-        bot.remove_webhook()
-        bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+        try:
+            bot.remove_webhook()
+            bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+        except Exception as e:
+            print(f"⚠️ Warning configuring webhook: {e}")
     else:
         print("⚙️ Configuring DEVELOPMENT (Polling mode)")
-        bot.remove_webhook()
+        try:
+            bot.remove_webhook()
+        except Exception as e:
+            print(f"⚠️ Warning removing webhook (continuing): {e}")
 
 # === Entry point ===
 if __name__ == '__main__':
@@ -323,5 +514,8 @@ if __name__ == '__main__':
         port = int(os.environ.get("PORT", 5000))
         app.run(host="0.0.0.0", port=port)
     else:
-        print("🤖 Polling for updates...")
-        bot.infinity_polling()
+        if _token_valid:
+            print("🤖 Polling for updates...")
+            bot.infinity_polling()
+        else:
+            print("Exiting due to invalid TELEGRAM_BOT_TOKEN. Fix .env and restart.")
