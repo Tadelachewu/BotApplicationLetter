@@ -255,17 +255,13 @@ def webhook():
 @bot.message_handler(commands=['start', 'help'])
 def cmd_start(message):
     cid = message.chat.id
-    sess = load_session(cid)
-    if sess and sess.get("language") in LANGUAGES and isinstance(sess.get("progress"), int):
-        user_data[cid] = {"language": sess["language"], "responses": sess.get("responses", {})}
-        user_progress[cid] = sess["progress"]
-        # Resume: ask next question or allow retry if already completed
-        if user_progress[cid] < len(steps):
-            bot.send_message(cid, "✅ Restored your previous session. Continuing…")
-            ask_next(cid)
-        else:
-            bot.send_message(cid, "✅ Restored your previous session. Use /retry to generate the letter again, or /edit to change something.")
-        return
+    # Always start fresh on /start: clear any persisted or in-memory session
+    try:
+        delete_session(cid)
+    except Exception:
+        logging.exception("Failed to delete session for %s on /start", cid)
+    user_data.pop(cid, None)
+    user_progress.pop(cid, None)
 
     user_data[cid] = {"language": None}
     user_progress[cid] = -1
