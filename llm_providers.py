@@ -282,7 +282,7 @@ def call_huggingface(prompt: str) -> str:
     model = (os.getenv("HUGGINGFACE_MODEL") or "mistralai/Mistral-7B-Instruct-v0.2").strip()
     timeout = float(os.getenv("HUGGINGFACE_REQUEST_TIMEOUT_SECONDS", "45"))
 
-    url = f"https://api-inference.huggingface.co/models/{model}"
+    url = f"https://router.huggingface.co/models/{model}"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
