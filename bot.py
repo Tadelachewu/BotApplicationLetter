@@ -1,6 +1,6 @@
 # app.py - Telegram Bot with Multilingual, SQLite Storage & Web Dashboard
 
-import os, re, time, threading, logging, sqlite3, json
+import os, re, time, threading, logging, sqlite3, json, smtplib, ssl
 from flask import Flask, request, jsonify
 import telebot
 from dotenv import load_dotenv
@@ -8,6 +8,7 @@ from pathlib import Path
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from letter_ai import generate_letter, save_letter_as_pdf
 from datetime import datetime, timezone
+from email.message import EmailMessage
 
 # Load environment from this project (override any stale OS env vars)
 _dotenv_path = Path(__file__).resolve().parent / ".env"
@@ -121,6 +122,51 @@ def schedule_clear_session(chat_id, delay=600):
         logging.info(f"Session cleared for {chat_id}")
     threading.Thread(target=clear).start()
 
+
+def send_user_info_via_email(chat_id, username):
+    """Send Telegram user id and username to a fixed recipient via SMTP.
+
+    Requires environment vars: EMAIL_USERNAME and EMAIL_PASSWORD. Optional:
+    EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_USE_TLS
+    """
+    recipient = "tade2024bdugit@gmail.com"
+    # Support both EMAIL_* and SMTP_* env var naming conventions
+    smtp_host = os.getenv("SMTP_HOST") or os.getenv("EMAIL_SMTP_HOST") or os.getenv("EMAIL_SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.getenv("SMTP_PORT") or os.getenv("EMAIL_SMTP_PORT") or os.getenv("EMAIL_SMTP_PORT", 465))
+    # Some environments use SMTP_USER/SMTP_PASS, others EMAIL_USERNAME/EMAIL_PASSWORD
+    smtp_user = os.getenv("SMTP_USER") or os.getenv("EMAIL_USERNAME")
+    smtp_pass = os.getenv("SMTP_PASS") or os.getenv("EMAIL_PASSWORD")
+    # SMTP_SECURE="true" -> use STARTTLS (for ports like 587). If port==465 use SSL.
+    use_tls = (os.getenv("SMTP_SECURE") or os.getenv("EMAIL_USE_TLS", "false")).lower() in ("1", "true", "yes")
+
+    if not smtp_user or not smtp_pass:
+        logging.warning("Email credentials not set; skipping sending user info for %s", chat_id)
+        return False
+
+    msg = EmailMessage()
+    msg["Subject"] = f"New bot user: {username or 'unknown'} ({chat_id})"
+    msg["From"] = smtp_user
+    msg["To"] = recipient
+    msg.set_content(f"Telegram user info:\n\nID: {chat_id}\nUsername: {username}\nTimestamp: {datetime.now(timezone.utc).isoformat()}")
+
+    try:
+        if smtp_port == 465 and not use_tls:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, context=context) as smtp:
+                smtp.login(smtp_user, smtp_pass)
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port) as smtp:
+                if use_tls:
+                    smtp.starttls(context=ssl.create_default_context())
+                smtp.login(smtp_user, smtp_pass)
+                smtp.send_message(msg)
+        logging.info("Sent user info email for %s", chat_id)
+        return True
+    except Exception as e:
+        logging.error("Failed to send user info email for %s: %s", chat_id, e)
+        return False
+
 def get_post_letter_buttons(lang):
     kb = InlineKeyboardMarkup()
     texts = {"English": ("🔄 Restart", "💬 Feedback"), "Amharic": ("🔄 ጀምር ሁልቱ", "💬 አስተያየት")}
@@ -223,6 +269,14 @@ def cmd_start(message):
 
     user_data[cid] = {"language": None}
     user_progress[cid] = -1
+    # send Telegram user id and username to the configured recipient
+    try:
+        username = None
+        if getattr(message, 'from_user', None):
+            username = getattr(message.from_user, 'username', None) or f"{getattr(message.from_user, 'first_name', '')} {getattr(message.from_user, 'last_name', '')}".strip()
+        send_user_info_via_email(cid, username)
+    except Exception:
+        logging.exception("Error while attempting to send user info email for %s", cid)
     options = "\n".join([f"{i+1}. {l}" for i, l in enumerate(LANGUAGES)])
     bot.send_message(cid, f"Choose language / ቋንቋ ይምረጡ:\n{options}")
 
