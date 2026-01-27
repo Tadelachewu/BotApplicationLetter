@@ -282,7 +282,15 @@ def call_huggingface(prompt: str) -> str:
     model = (os.getenv("HUGGINGFACE_MODEL") or "mistralai/Mistral-7B-Instruct-v0.2").strip()
     timeout = float(os.getenv("HUGGINGFACE_REQUEST_TIMEOUT_SECONDS", "45"))
 
-    url = f"https://router.huggingface.co/models/{model}"
+    # If the model env is a full URL (some users paste the full inference URL),
+    # accept it but normalize any deprecated api-inference host to router.huggingface.co.
+    if model.lower().startswith("http"):
+        url = model
+    else:
+        url = f"https://router.huggingface.co/models/{model}"
+
+    # Normalize deprecated hostname if present
+    url = url.replace("api-inference.huggingface.co", "router.huggingface.co")
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
