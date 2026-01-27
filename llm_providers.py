@@ -275,79 +275,14 @@ def call_groq(prompt: str) -> str:
 
 
 def call_huggingface(prompt: str) -> str:
-    api_key = (os.getenv("HUGGINGFACE_API_KEY") or os.getenv("HF_API_KEY") or "").strip()
-    if not api_key or api_key.lower().startswith("your_"):
-        raise LLMAuthError("HUGGINGFACE_API_KEY (or HF_API_KEY) is missing or placeholder", kind="auth", provider="huggingface")
-
-    model = (os.getenv("HUGGINGFACE_MODEL") or "mistralai/Mistral-7B-Instruct-v0.2").strip()
-    timeout = float(os.getenv("HUGGINGFACE_REQUEST_TIMEOUT_SECONDS", "45"))
-
-    # If the model env is a full URL (some users paste the full inference URL),
-    # accept it but normalize any deprecated api-inference host to router.huggingface.co.
-    if model.lower().startswith("http"):
-        url = model
-    else:
-        url = f"https://router.huggingface.co/models/{model}"
-
-    # Normalize deprecated hostname if present
-    url = url.replace("api-inference.huggingface.co", "router.huggingface.co")
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    # Inference API behavior varies by model; keep request simple.
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": 700,
-            "temperature": 0.4,
-            "return_full_text": False,
-        },
-        "options": {"wait_for_model": True},
-    }
-
-    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-    data = _get_json_safely(resp)
-
-    if resp.status_code in (401, 403):
-        msg = (data.get("error") if isinstance(data, dict) else None) or "Forbidden/Unauthorized"
-        raise LLMAuthError(str(msg), kind="auth", provider="huggingface")
-
-    if resp.status_code == 429:
-        msg = (data.get("error") if isinstance(data, dict) else None) or "Too Many Requests"
-        raise LLMRateLimitError(str(msg), kind="rate_limit", provider="huggingface")
-
-    if resp.status_code in (402,):
-        msg = (data.get("error") if isinstance(data, dict) else None) or "Payment required"
-        raise LLMQuotaError(str(msg), kind="quota", provider="huggingface")
-
-    try:
-        resp.raise_for_status()
-    except requests.exceptions.HTTPError as e:
-        msg = (data.get("error") if isinstance(data, dict) else None) or str(e)
-        raise LLMProviderError(str(msg), kind="http_error", provider="huggingface")
-
-    # Typical successful output: a list of {"generated_text": "..."}
-    if isinstance(data, list) and data and isinstance(data[0], dict):
-        text = (data[0].get("generated_text") or "").strip()
-        if text:
-            return text
-
-    # Some models return dict with "generated_text".
-    if isinstance(data, dict):
-        text = (data.get("generated_text") or "").strip()
-        if text:
-            return text
-
-    raise LLMProviderError("Unrecognized Hugging Face response format", kind="parse", provider="huggingface")
+    # Hugging Face support removed — function kept as stub for compatibility.
+    raise LLMProviderError("Hugging Face provider removed from this build", kind="config", provider="huggingface")
 
 
 _PROVIDER_CALLS = {
     "gemini": call_gemini,
     "openai": call_openai,
     "groq": call_groq,
-    "huggingface": call_huggingface,
 }
 
 
