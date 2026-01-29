@@ -321,6 +321,14 @@ def cmd_edit(message):
 @bot.callback_query_handler(func=lambda call: True)
 def cb_handler(call):
     cid = call.message.chat.id
+    # Ensure user_data[cid] is initialized
+    if cid not in user_data:
+        sess = load_session(cid)
+        if sess and sess.get("language"):
+            user_data[cid] = {"language": sess.get("language", "English"), "responses": sess.get("responses", {})}
+            user_progress[cid] = sess.get("progress", 0)
+        else:
+            user_data[cid] = {"language": "English", "responses": {}}
     lang = user_data[cid].get('language', 'English')
     if call.data == "restart":
         cmd_reset(call.message)

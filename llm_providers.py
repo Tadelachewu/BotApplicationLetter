@@ -4,6 +4,7 @@ import random
 import requests
 import email.utils
 from datetime import datetime
+import subprocess
 
 
 class LLMError(Exception):
@@ -279,10 +280,72 @@ def call_huggingface(prompt: str) -> str:
     raise LLMProviderError("Hugging Face provider removed from this build", kind="config", provider="huggingface")
 
 
+def call_ollama(prompt: str) -> str:
+    """Attempt to use a locally installed Ollama model as a fallback.
+
+    Behavior:
+    - If env `OLLAMA_COMMAND` is set, it is treated as a shell command template
+      and formatted with `{prompt}` and `{model}`.
+    - Otherwise, the code tries to invoke the `ollama` CLI: `ollama chat <model>`
+      with the prompt passed via stdin. The `OLLAMA_MODEL` env var selects model.
+
+    This keeps the integration generic: users can set `OLLAMA_COMMAND` to a
+    working invocation for their machine or set `OLLAMA_MODEL` and install
+    the `ollama` CLI.
+    """
+
+    # Restrict Ollama to development only
+    env = (os.getenv("ENV") or os.getenv("DEVELOPMENT") or "").lower()
+    if env not in {"development", "dev", "true", "1"}:
+        raise LLMProviderError(
+            "Ollama provider is only available in development. Set ENV=development or DEVELOPMENT=True.",
+            kind="config",
+            provider="ollama",
+        )
+
+
+    model = (os.getenv("OLLAMA_MODEL") or "").strip()
+    if not model:
+        raise LLMProviderError(
+            "OLLAMA_MODEL is not set. Please set OLLAMA_MODEL to your local model name.",
+            kind="config",
+            provider="ollama",
+        )
+
+    try:
+        # Use the Ollama HTTP API for local development (streaming response)
+        import requests, json
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model, "prompt": prompt},
+            timeout=120,
+            stream=True
+        )
+        response.raise_for_status()
+        out = ""
+        for line in response.iter_lines():
+            if not line:
+                continue
+            try:
+                data = json.loads(line.decode("utf-8"))
+                out += data.get("response", "")
+            except Exception:
+                continue
+        out = out.strip()
+        if not out:
+            raise LLMProviderError("Empty response from Ollama", kind="empty", provider="ollama")
+        return out
+    except requests.exceptions.ConnectionError:
+        raise LLMProviderError("Ollama API not reachable at http://localhost:11434. Is Ollama running?", kind="unavailable", provider="ollama")
+    except Exception as e:
+        raise LLMProviderError(str(e), kind="error", provider="ollama")
+
+
 _PROVIDER_CALLS = {
     "gemini": call_gemini,
     "openai": call_openai,
     "groq": call_groq,
+    "ollama": call_ollama,
 }
 
 

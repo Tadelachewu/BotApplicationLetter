@@ -110,8 +110,15 @@ STRICT RULES:
 
     available = set(list_available_providers())
     provider_order = [p for p in provider_order if p in available]
+    # If no valid configured providers remain, fall back to gemini
     if not provider_order:
         provider_order = ["gemini"]
+
+    # Automatically try local `ollama` as a last-resort fallback when available
+    # This allows the app to use a local Ollama model on the user's machine
+    # without requiring changes to LLM_PROVIDER_ORDER.
+    if "ollama" in available and "ollama" not in provider_order:
+        provider_order.append("ollama")
 
     last_error = None
     for provider in provider_order:
