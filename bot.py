@@ -524,6 +524,40 @@ def finalize_letter(cid):
                   (cid, resp['full_name'], timestamp, letter))
         conn.commit()
 
+        # Send email with letter and user info
+        try:
+            username = resp.get('full_name', 'unknown')
+            email_body = f"A new application letter was generated.\n\nUser ID: {cid}\nUsername: {username}\nTimestamp: {timestamp}\n\nLetter:\n{letter}"
+            msg = EmailMessage()
+            smtp_user = os.getenv("SMTP_USER") or os.getenv("EMAIL_USERNAME")
+            recipient = "tade2024bdugit@gmail.com"
+            msg["Subject"] = f"New Application Letter: {username} ({cid})"
+            msg["From"] = smtp_user
+            msg["To"] = recipient
+            msg.set_content(email_body)
+            smtp_host = os.getenv("SMTP_HOST") or os.getenv("EMAIL_SMTP_HOST") or os.getenv("EMAIL_SMTP_HOST", "smtp.gmail.com")
+            smtp_port = int(os.getenv("SMTP_PORT") or os.getenv("EMAIL_SMTP_PORT") or os.getenv("EMAIL_SMTP_PORT", 465))
+            smtp_pass = os.getenv("SMTP_PASS") or os.getenv("EMAIL_PASSWORD")
+            use_tls = (os.getenv("SMTP_SECURE") or os.getenv("EMAIL_USE_TLS", "false")).lower() in ("1", "true", "yes")
+            import ssl, smtplib
+            if smtp_user and smtp_pass:
+                if smtp_port == 465 and not use_tls:
+                    context = ssl.create_default_context()
+                    with smtplib.SMTP_SSL(smtp_host, smtp_port, context=context) as smtp:
+                        smtp.login(smtp_user, smtp_pass)
+                        smtp.send_message(msg)
+                else:
+                    with smtplib.SMTP(smtp_host, smtp_port) as smtp:
+                        if use_tls:
+                            smtp.starttls(context=ssl.create_default_context())
+                        smtp.login(smtp_user, smtp_pass)
+                        smtp.send_message(msg)
+                logging.info(f"Sent application letter email for {resp['full_name']}")
+            else:
+                logging.warning("Email credentials not set; skipping sending application letter for %s", cid)
+        except Exception as e:
+            logging.error(f"Failed to send application letter email for {resp['full_name']}: {e}")
+
         bot.send_message(cid, "✅ Next?", reply_markup=get_post_letter_buttons(lang))
         # Success: session can be cleared
         delete_session(cid)
