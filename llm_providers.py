@@ -294,11 +294,12 @@ def call_ollama(prompt: str) -> str:
     the `ollama` CLI.
     """
 
-    # Restrict Ollama to development only
-    env = (os.getenv("ENV") or os.getenv("DEVELOPMENT") or "").lower()
-    if env not in {"development", "dev", "true", "1"}:
+    # Restrict Ollama to development by default. Allow opt-in for production
+    env = (os.getenv("ENV") or os.getenv("ENVIRONMENT") or os.getenv("DEVELOPMENT") or "").lower()
+    allow_prod = str(os.getenv("OLLAMA_ALLOW_PRODUCTION") or "").lower() in {"1", "true", "yes", "on"}
+    if env not in {"development", "dev", "true", "1"} and not allow_prod:
         raise LLMProviderError(
-            "Ollama provider is only available in development. Set ENV=development or DEVELOPMENT=True.",
+            "Ollama provider is only available in development. To enable in production set OLLAMA_ALLOW_PRODUCTION=1 or set ENV=development.",
             kind="config",
             provider="ollama",
         )
