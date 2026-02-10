@@ -3,15 +3,17 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
+# 1️⃣ Install system dependencies (ADD zstd)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     gcc \
     build-essential \
     libffi-dev \
+    zstd \
  && rm -rf /var/lib/apt/lists/*
 
-# Install Ollama
+# 2️⃣ Install Ollama
 RUN curl -fsSL https://ollama.com/install.sh | sh
 
 WORKDIR /app
