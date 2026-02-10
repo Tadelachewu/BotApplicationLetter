@@ -3,7 +3,7 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# 1️⃣ Install system dependencies (ADD zstd)
+# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zstd \
  && rm -rf /var/lib/apt/lists/*
 
-# 2️⃣ Install Ollama
+# Install Ollama
 RUN curl -fsSL https://ollama.com/install.sh | sh
 
 WORKDIR /app
@@ -25,10 +25,8 @@ COPY . .
 
 RUN mkdir -p /app/letters
 
-# 🔥 Pull Llama 3
-RUN ollama pull llama3
-
 EXPOSE 5000
 EXPOSE 11434
 
-CMD ollama serve & python bot.py
+# Start Ollama + pull model + start bot
+CMD ollama serve & sleep 5 && ollama pull llama3 && python bot.py
