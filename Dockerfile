@@ -28,5 +28,5 @@ RUN mkdir -p /app/letters
 EXPOSE 5000
 EXPOSE 11434
 
-# Start Ollama + pull model + start bot
-CMD ollama serve & sleep 5 && ollama pull llama3 && python bot.py
+# Start Ollama, pull model at runtime, then start bot
+CMD ollama serve & sleep 10 && ollama pull llama3 || true && python bot.py
