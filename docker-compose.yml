@@ -7,15 +7,25 @@ services:
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OLLAMA_MODEL=${OLLAMA_MODEL}
       - WEBHOOK_URL=${WEBHOOK_URL:-""}
       - ENVIRONMENT=${ENVIRONMENT}
-      - PORT=5000
+      - ENV=${ENV}
+      - LLM_PROVIDER_ORDER=${LLM_PROVIDER_ORDER}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_SECURE=${SMTP_SECURE}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - OLLAMA_ALLOW_PRODUCTION=${OLLAMA_ALLOW_PRODUCTION}
+      - PORT=${PORT:-5000}
     ports:
       - "5000:5000"
     volumes:
       - ./letters:/app/letters
       - ./bot_data.db:/app/bot_data.db
-      - ./ollama_models:/root/.ollama
     logging:
       driver: "json-file"
       options:
