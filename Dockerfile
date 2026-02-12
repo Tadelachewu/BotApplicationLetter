@@ -30,14 +30,8 @@ EXPOSE 11434
 
 # Start Ollama, pull model at runtime (from $OLLAMA_MODEL), then start bot
 # If OLLAMA_MODEL is set the container will attempt to pull that model at startup.
-CMD if [ -n "$OLLAMA_MODEL" ]; then echo "Pulling Ollama model: $OLLAMA_MODEL" && ollama pull "$OLLAMA_MODEL" || true; fi \
-    && echo "Starting Ollama server" && ollama serve & \
-    && echo "Waiting for Ollama to become healthy" \
-    && for i in $(seq 1 60); do \
-    if curl -sS --fail http://localhost:11434/api/info >/dev/null 2>&1; then \
-    echo "Ollama is healthy"; break; \
-    fi; \
-    echo "waiting... ($i)"; sleep 5; \
-    done \
-    && echo "Starting bot" \
-    && python bot.py
+COPY start.sh /usr/local/bin/start.sh
+RUN chmod +x /usr/local/bin/start.sh
+
+# Use an explicit entrypoint script (POSIX) to avoid /bin/sh parsing issues
+CMD ["/usr/local/bin/start.sh"]
