@@ -32,3 +32,13 @@ Notes
 
 Security
 - Be careful when setting `OLLAMA_COMMAND` — it is executed via shell when provided. Prefer `OLLAMA_MODEL` with the standard `ollama` CLI for safety.
+
+Docker image notes
+------------------
+
+The project's `Dockerfile` will attempt to pull whatever model name is set in the `OLLAMA_MODEL` environment variable at container startup. Do not bundle large GGUF blobs into the image; instead either:
+
+- Provide a small/quantized model name (Q4 or stronger) via `OLLAMA_MODEL` so `ollama pull <model>` downloads an appropriately sized model at runtime.
+- Or mount a model directory into the container at `/root/.ollama/models` (host or network storage) so the container can use an existing uploaded model.
+
+Note: the repo includes `ollama_models/` for local development manifests. The Docker build ignores that folder by default (see `.dockerignore`) to avoid creating oversized images.
