@@ -316,11 +316,16 @@ def call_ollama(prompt: str) -> str:
     try:
         # Use the Ollama HTTP API for local development (streaming response)
         import requests, json
+        # Allow configuring the Ollama request timeout (read timeout).
+        # Use a short connect timeout and a longer read timeout because
+        # starting the runner may take a while while loading model tensors.
+        read_timeout = float(os.getenv("OLLAMA_REQUEST_TIMEOUT_SECONDS", "600"))
+        connect_timeout = float(os.getenv("OLLAMA_CONNECT_TIMEOUT_SECONDS", "10"))
         response = requests.post(
             "http://localhost:11434/api/generate",
             json={"model": model, "prompt": prompt},
-            timeout=120,
-            stream=True
+            timeout=(connect_timeout, read_timeout),
+            stream=True,
         )
         response.raise_for_status()
         out = ""
@@ -336,6 +341,18 @@ def call_ollama(prompt: str) -> str:
         if not out:
             raise LLMProviderError("Empty response from Ollama", kind="empty", provider="ollama")
         return out
+    except requests.exceptions.ConnectTimeout:
+        raise LLMProviderError(
+            f"Timed out connecting to Ollama at http://localhost:11434 (connect timeout={connect_timeout}s). Is Ollama running?",
+            kind="unavailable",
+            provider="ollama",
+        )
+    except requests.exceptions.ReadTimeout:
+        raise LLMProviderError(
+            f"Timed out waiting for Ollama to start the model (read timeout={read_timeout}s). Consider increasing OLLAMA_REQUEST_TIMEOUT_SECONDS or ensuring the host has enough memory.",
+            kind="unavailable",
+            provider="ollama",
+        )
     except requests.exceptions.ConnectionError:
         raise LLMProviderError("Ollama API not reachable at http://localhost:11434. Is Ollama running?", kind="unavailable", provider="ollama")
     except Exception as e:
