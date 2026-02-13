@@ -322,7 +322,7 @@ def call_ollama(prompt: str) -> str:
         read_timeout = float(os.getenv("OLLAMA_REQUEST_TIMEOUT_SECONDS", "600"))
         connect_timeout = float(os.getenv("OLLAMA_CONNECT_TIMEOUT_SECONDS", "10"))
         response = requests.post(
-            "http://localhost:11434/api/generate",
+            "http://172.23.37.24:11434/api/generate",
             json={"model": model, "prompt": prompt},
             timeout=(connect_timeout, read_timeout),
             stream=True,
