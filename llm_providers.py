@@ -359,11 +359,86 @@ def call_ollama(prompt: str) -> str:
         raise LLMProviderError(str(e), kind="error", provider="ollama")
 
 
+def call_openrouter(prompt: str) -> str:
+    """Call OpenRouter's API (https://openrouter.ai) as a fallback provider.
+
+    Environment variables:
+    - OPENROUTER_API_KEY (required)
+    - OPENROUTER_MODEL (optional, default deepseek/deepseek-r1-0528:free)
+    - OPENROUTER_REQUEST_TIMEOUT_SECONDS (optional)
+    - OPENROUTER_REFERER, OPENROUTER_XTITLE (optional headers)
+    """
+    api_key = (os.getenv("OPENROUTER_API_KEY") or "").strip()
+    if not api_key or api_key.lower().startswith("your_"):
+        raise LLMAuthError("OPENROUTER_API_KEY is missing or placeholder", kind="auth", provider="openrouter")
+
+    model = (os.getenv("OPENROUTER_MODEL") or "deepseek/deepseek-r1-0528:free").strip()
+    timeout = float(os.getenv("OPENROUTER_REQUEST_TIMEOUT_SECONDS", "30"))
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    referer = os.getenv("OPENROUTER_REFERER")
+    xtitle = os.getenv("OPENROUTER_XTITLE")
+    if referer:
+        headers["HTTP-Referer"] = referer
+    if xtitle:
+        headers["X-Title"] = xtitle
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant that follows formatting instructions exactly."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.4,
+    }
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    data = _get_json_safely(resp)
+
+    if resp.status_code in (401, 403):
+        msg = (data.get("error") or {}).get("message") or "Forbidden/Unauthorized"
+        raise LLMAuthError(msg, kind="auth", provider="openrouter")
+
+    if resp.status_code == 429:
+        err = data.get("error") or {}
+        err_type = str(err.get("type") or "").lower()
+        err_code = str(err.get("code") or "").lower()
+        msg = str(err.get("message") or "Too Many Requests")
+        if "insufficient" in err_type or "insufficient" in err_code or "quota" in msg.lower():
+            raise LLMQuotaError(msg, kind="quota", provider="openrouter")
+        raise LLMRateLimitError(msg, kind="rate_limit", provider="openrouter")
+
+    if resp.status_code == 402:
+        msg = (data.get("error") or {}).get("message") or "Payment required"
+        raise LLMQuotaError(msg, kind="quota", provider="openrouter")
+
+    try:
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        msg = (data.get("error") or {}).get("message") or str(e)
+        raise LLMProviderError(msg, kind="http_error", provider="openrouter")
+
+    choices = data.get("choices") or []
+    if not choices:
+        raise LLMProviderError("Empty response", kind="empty", provider="openrouter")
+
+    message = choices[0].get("message") or {}
+    text = (message.get("content") or "").strip()
+    if not text:
+        raise LLMProviderError("Empty content", kind="empty", provider="openrouter")
+    return text
+
+
 _PROVIDER_CALLS = {
     "gemini": call_gemini,
     "openai": call_openai,
     "groq": call_groq,
     "ollama": call_ollama,
+    "openrouter": call_openrouter,
 }
 
 
