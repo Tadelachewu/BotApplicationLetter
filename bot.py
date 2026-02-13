@@ -123,6 +123,25 @@ def schedule_clear_session(chat_id, delay=600):
     threading.Thread(target=clear).start()
 
 
+def _get_smtp_config():
+    host = os.getenv("SMTP_HOST") or os.getenv("EMAIL_SMTP_HOST") or "smtp.gmail.com"
+    port_str = os.getenv("SMTP_PORT") or os.getenv("EMAIL_SMTP_PORT") or "465"
+    try:
+        port = int(port_str)
+    except Exception:
+        port = 465
+    user = os.getenv("SMTP_USER") or os.getenv("EMAIL_USERNAME")
+    password = os.getenv("SMTP_PASS") or os.getenv("EMAIL_PASSWORD")
+    secure_env = os.getenv("SMTP_SECURE") or os.getenv("EMAIL_USE_TLS")
+    if secure_env is None:
+        # Default to STARTTLS for common submission port
+        use_tls = True if port == 587 else False
+    else:
+        use_tls = str(secure_env).lower() in ("1", "true", "yes", "on")
+    use_ssl = True if port == 465 and not use_tls else False
+    return {"host": host, "port": port, "user": user, "password": password, "use_tls": use_tls, "use_ssl": use_ssl}
+
+
 def send_user_info_via_email(chat_id, username):
     """Send Telegram user id and username to a fixed recipient via SMTP.
 
@@ -130,36 +149,30 @@ def send_user_info_via_email(chat_id, username):
     EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_USE_TLS
     """
     recipient = "tade2024bdugit@gmail.com"
-    # Support both EMAIL_* and SMTP_* env var naming conventions
-    smtp_host = os.getenv("SMTP_HOST") or os.getenv("EMAIL_SMTP_HOST") or os.getenv("EMAIL_SMTP_HOST", "smtp.gmail.com")
-    smtp_port = int(os.getenv("SMTP_PORT") or os.getenv("EMAIL_SMTP_PORT") or os.getenv("EMAIL_SMTP_PORT", 465))
-    # Some environments use SMTP_USER/SMTP_PASS, others EMAIL_USERNAME/EMAIL_PASSWORD
-    smtp_user = os.getenv("SMTP_USER") or os.getenv("EMAIL_USERNAME")
-    smtp_pass = os.getenv("SMTP_PASS") or os.getenv("EMAIL_PASSWORD")
-    # SMTP_SECURE="true" -> use STARTTLS (for ports like 587). If port==465 use SSL.
-    use_tls = (os.getenv("SMTP_SECURE") or os.getenv("EMAIL_USE_TLS", "false")).lower() in ("1", "true", "yes")
 
-    if not smtp_user or not smtp_pass:
+    cfg = _get_smtp_config()
+
+    if not cfg["user"] or not cfg["password"]:
         logging.warning("Email credentials not set; skipping sending user info for %s", chat_id)
         return False
 
     msg = EmailMessage()
     msg["Subject"] = f"New bot user: {username or 'unknown'} ({chat_id})"
-    msg["From"] = smtp_user
+    msg["From"] = cfg["user"]
     msg["To"] = recipient
     msg.set_content(f"Telegram user info:\n\nID: {chat_id}\nUsername: {username}\nTimestamp: {datetime.now(timezone.utc).isoformat()}")
 
     try:
-        if smtp_port == 465 and not use_tls:
+        if cfg["use_ssl"]:
             context = ssl.create_default_context()
-            with smtplib.SMTP_SSL(smtp_host, smtp_port, context=context) as smtp:
-                smtp.login(smtp_user, smtp_pass)
+            with smtplib.SMTP_SSL(cfg["host"], cfg["port"], context=context) as smtp:
+                smtp.login(cfg["user"], cfg["password"])
                 smtp.send_message(msg)
         else:
-            with smtplib.SMTP(smtp_host, smtp_port) as smtp:
-                if use_tls:
+            with smtplib.SMTP(cfg["host"], cfg["port"]) as smtp:
+                if cfg["use_tls"]:
                     smtp.starttls(context=ssl.create_default_context())
-                smtp.login(smtp_user, smtp_pass)
+                smtp.login(cfg["user"], cfg["password"])
                 smtp.send_message(msg)
         logging.info("Sent user info email for %s", chat_id)
         return True
@@ -247,8 +260,14 @@ def dashboard_feedback():
 def webhook():
     if request.headers.get('content-type') == 'application/json':
         u = telebot.types.Update.de_json(request.get_data().decode())
-        bot.process_new_updates([u])
-        return '', 200
+        # Process updates in a background thread so the HTTP response is fast.
+        try:
+            threading.Thread(target=bot.process_new_updates, args=([u],), daemon=True).start()
+            return '', 200
+        except Exception:
+            # Fallback to synchronous processing on unexpected failure
+            bot.process_new_updates([u])
+            return '', 200
     return 'Bad request', 400
 
 # Handlers
@@ -529,30 +548,29 @@ def finalize_letter(cid):
             username = resp.get('full_name', 'unknown')
             email_body = f"A new application letter was generated.\n\nUser ID: {cid}\nUsername: {username}\nTimestamp: {timestamp}\n\nLetter:\n{letter}"
             msg = EmailMessage()
-            smtp_user = os.getenv("SMTP_USER") or os.getenv("EMAIL_USERNAME")
             recipient = "tade2024bdugit@gmail.com"
             msg["Subject"] = f"New Application Letter: {username} ({cid})"
-            msg["From"] = smtp_user
+            cfg = _get_smtp_config()
+            msg["From"] = cfg.get("user")
             msg["To"] = recipient
             msg.set_content(email_body)
-            smtp_host = os.getenv("SMTP_HOST") or os.getenv("EMAIL_SMTP_HOST") or os.getenv("EMAIL_SMTP_HOST", "smtp.gmail.com")
-            smtp_port = int(os.getenv("SMTP_PORT") or os.getenv("EMAIL_SMTP_PORT") or os.getenv("EMAIL_SMTP_PORT", 465))
-            smtp_pass = os.getenv("SMTP_PASS") or os.getenv("EMAIL_PASSWORD")
-            use_tls = (os.getenv("SMTP_SECURE") or os.getenv("EMAIL_USE_TLS", "false")).lower() in ("1", "true", "yes")
-            import ssl, smtplib
-            if smtp_user and smtp_pass:
-                if smtp_port == 465 and not use_tls:
-                    context = ssl.create_default_context()
-                    with smtplib.SMTP_SSL(smtp_host, smtp_port, context=context) as smtp:
-                        smtp.login(smtp_user, smtp_pass)
-                        smtp.send_message(msg)
-                else:
-                    with smtplib.SMTP(smtp_host, smtp_port) as smtp:
-                        if use_tls:
-                            smtp.starttls(context=ssl.create_default_context())
-                        smtp.login(smtp_user, smtp_pass)
-                        smtp.send_message(msg)
-                logging.info(f"Sent application letter email for {resp['full_name']}")
+
+            if cfg.get("user") and cfg.get("password"):
+                try:
+                    if cfg.get("use_ssl"):
+                        context = ssl.create_default_context()
+                        with smtplib.SMTP_SSL(cfg["host"], cfg["port"], context=context) as smtp:
+                            smtp.login(cfg["user"], cfg["password"])
+                            smtp.send_message(msg)
+                    else:
+                        with smtplib.SMTP(cfg["host"], cfg["port"]) as smtp:
+                            if cfg.get("use_tls"):
+                                smtp.starttls(context=ssl.create_default_context())
+                            smtp.login(cfg["user"], cfg["password"])
+                            smtp.send_message(msg)
+                    logging.info(f"Sent application letter email for {resp['full_name']}")
+                except Exception as e:
+                    logging.error(f"Failed to send application letter email for {resp['full_name']}: {e}")
             else:
                 logging.warning("Email credentials not set; skipping sending application letter for %s", cid)
         except Exception as e:
