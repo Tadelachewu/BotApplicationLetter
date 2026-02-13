@@ -14,7 +14,9 @@ echo "Waiting for Ollama to become healthy"
 i=0
 max=60
 while [ "$i" -lt "$max" ]; do
-  if curl -sS --fail http://localhost:11434/api/info >/dev/null 2>&1; then
+  # Consider the Ollama HTTP server "up" if we can connect to the port
+  # (some Ollama/Gin builds may not expose /api/info and return 404).
+  if curl -sS --max-time 2 http://localhost:11434/ >/dev/null 2>&1; then
     echo "Ollama is healthy"
     break
   fi
