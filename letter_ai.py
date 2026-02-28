@@ -114,11 +114,22 @@ STRICT RULES:
     if not provider_order:
         provider_order = ["gemini"]
 
-    # Automatically try local `ollama` as a last-resort fallback when available
-    # This allows the app to use a local Ollama model on the user's machine
-    # without requiring changes to LLM_PROVIDER_ORDER.
+    # Automatically try local `ollama` as a last-resort fallback when available,
+    # but ignore it in production unless explicitly allowed via OLLAMA_ALLOW_PRODUCTION.
+    allow_ollama_in_production = str(os.getenv("OLLAMA_ALLOW_PRODUCTION") or "").strip().lower() in ("1", "true", "yes", "y")
+    current_env = (os.getenv("ENVIRONMENT") or os.getenv("ENV") or "").strip().lower()
     if "ollama" in available and "ollama" not in provider_order:
-        provider_order.append("ollama")
+        if current_env != "production" or allow_ollama_in_production:
+            provider_order.append("ollama")
+
+    # Ensure `openrouter` is always the final fallback provider.
+    # Some environments may omit it from `LLM_PROVIDER_ORDER` but we want
+    # to always try `openrouter` last because it's considered the most
+    # reliable fallback for this deployment.
+    if "openrouter" in available:
+        # remove any existing occurrences to avoid duplicates
+        provider_order = [p for p in provider_order if p != "openrouter"]
+        provider_order.append("openrouter")
 
     last_error = None
     for provider in provider_order:
