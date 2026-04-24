@@ -1,6 +1,7 @@
 # app.py - Telegram Bot with Multilingual, SQLite Storage & Web Dashboard
 
 import os, re, time, threading, logging, sqlite3, json, smtplib, ssl
+import sys
 from flask import Flask, request, jsonify
 import telebot
 from dotenv import load_dotenv
@@ -13,12 +14,13 @@ from email.message import EmailMessage
 # Load environment from this project (override any stale OS env vars)
 _dotenv_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=_dotenv_path, override=True)
+_SMTP_TEST_MODE = "--smtp-test" in sys.argv
 BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 WEBHOOK_URL = (os.getenv("WEBHOOK_URL") or "").strip()
 ENVIRONMENT = os.getenv("ENVIRONMENT", "DEVELOPMENT").upper()
-if BOT_TOKEN.lower() == "your_telegram_bot_token_here":
+if not _SMTP_TEST_MODE and BOT_TOKEN.lower() == "your_telegram_bot_token_here":
     raise ValueError("TELEGRAM_BOT_TOKEN is still the placeholder. Update and save .env, then restart.")
-if not BOT_TOKEN or (ENVIRONMENT == "PRODUCTION" and not WEBHOOK_URL):
+if not _SMTP_TEST_MODE and (not BOT_TOKEN or (ENVIRONMENT == "PRODUCTION" and not WEBHOOK_URL)):
     raise ValueError("Required environment variables are missing")
 
 # Basic token sanity check to avoid starting polling with an invalid token
@@ -132,14 +134,99 @@ def _get_smtp_config():
         port = 465
     user = os.getenv("SMTP_USER") or os.getenv("EMAIL_USERNAME")
     password = os.getenv("SMTP_PASS") or os.getenv("EMAIL_PASSWORD")
-    secure_env = os.getenv("SMTP_SECURE") or os.getenv("EMAIL_USE_TLS")
-    if secure_env is None:
-        # Default to STARTTLS for common submission port
+    timeout_str = os.getenv("SMTP_TIMEOUT_SECONDS") or "20"
+    try:
+        timeout = float(timeout_str)
+    except Exception:
+        timeout = 20.0
+
+    def _env_true(v):
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    use_ssl = None
+    use_tls = None
+    explicit_ssl = os.getenv("SMTP_USE_SSL")
+    explicit_tls = os.getenv("SMTP_USE_TLS") or os.getenv("EMAIL_USE_TLS")
+    if explicit_ssl is not None:
+        use_ssl = _env_true(explicit_ssl)
+    if explicit_tls is not None:
+        use_tls = _env_true(explicit_tls)
+
+    secure_env = os.getenv("SMTP_SECURE")
+    if use_ssl is None and use_tls is None and secure_env is not None:
+        if port == 465:
+            use_ssl = _env_true(secure_env)
+            use_tls = False
+        else:
+            use_tls = _env_true(secure_env)
+            use_ssl = False
+
+    if use_ssl is None and use_tls is None:
+        use_ssl = True if port == 465 else False
         use_tls = True if port == 587 else False
-    else:
-        use_tls = str(secure_env).lower() in ("1", "true", "yes", "on")
-    use_ssl = True if port == 465 and not use_tls else False
-    return {"host": host, "port": port, "user": user, "password": password, "use_tls": use_tls, "use_ssl": use_ssl}
+
+    if use_ssl and use_tls:
+        use_tls = False
+
+    return {
+        "host": host,
+        "port": port,
+        "user": user,
+        "password": password,
+        "use_tls": bool(use_tls),
+        "use_ssl": bool(use_ssl),
+        "timeout": timeout,
+    }
+
+
+def _send_email_message(msg: EmailMessage, cfg: dict):
+    if not cfg.get("user") or not cfg.get("password"):
+        raise ValueError("SMTP credentials missing")
+
+    if cfg.get("use_ssl"):
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL(cfg["host"], cfg["port"], context=context, timeout=cfg.get("timeout", 20)) as smtp:
+            smtp.ehlo()
+            smtp.login(cfg["user"], cfg["password"])
+            smtp.send_message(msg)
+            return True
+
+    with smtplib.SMTP(cfg["host"], cfg["port"], timeout=cfg.get("timeout", 20)) as smtp:
+        smtp.ehlo()
+        if cfg.get("use_tls"):
+            smtp.starttls(context=ssl.create_default_context())
+            smtp.ehlo()
+        smtp.login(cfg["user"], cfg["password"])
+        smtp.send_message(msg)
+        return True
+
+
+def smtp_self_test():
+    cfg = _get_smtp_config()
+    if not cfg.get("user") or not cfg.get("password"):
+        return False, "Missing SMTP_USER/SMTP_PASS (or EMAIL_USERNAME/EMAIL_PASSWORD)"
+
+    try:
+        if cfg.get("use_ssl"):
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(cfg["host"], cfg["port"], context=context, timeout=cfg.get("timeout", 20)) as smtp:
+                smtp.ehlo()
+                smtp.login(cfg["user"], cfg["password"])
+                code, message = smtp.noop()
+                return int(code) == 250, f"Connected (SSL). NOOP={code} {message.decode('utf-8', errors='ignore') if hasattr(message, 'decode') else message}"
+
+        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=cfg.get("timeout", 20)) as smtp:
+            smtp.ehlo()
+            if cfg.get("use_tls"):
+                smtp.starttls(context=ssl.create_default_context())
+                smtp.ehlo()
+            smtp.login(cfg["user"], cfg["password"])
+            code, message = smtp.noop()
+            return int(code) == 250, f"Connected. NOOP={code} {message.decode('utf-8', errors='ignore') if hasattr(message, 'decode') else message}"
+    except smtplib.SMTPAuthenticationError as e:
+        return False, f"Auth failed: {e}"
+    except Exception as e:
+        return False, str(e)
 
 
 def send_user_info_via_email(chat_id, username):
@@ -148,7 +235,7 @@ def send_user_info_via_email(chat_id, username):
     Requires environment vars: EMAIL_USERNAME and EMAIL_PASSWORD. Optional:
     EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_USE_TLS
     """
-    recipient = "tade2024bdugit@gmail.com"
+    recipient = (os.getenv("ADMIN_EMAIL_RECIPIENT") or "tade2024bdugit@gmail.com").strip()
 
     cfg = _get_smtp_config()
 
@@ -163,17 +250,7 @@ def send_user_info_via_email(chat_id, username):
     msg.set_content(f"Telegram user info:\n\nID: {chat_id}\nUsername: {username}\nTimestamp: {datetime.now(timezone.utc).isoformat()}")
 
     try:
-        if cfg["use_ssl"]:
-            context = ssl.create_default_context()
-            with smtplib.SMTP_SSL(cfg["host"], cfg["port"], context=context) as smtp:
-                smtp.login(cfg["user"], cfg["password"])
-                smtp.send_message(msg)
-        else:
-            with smtplib.SMTP(cfg["host"], cfg["port"]) as smtp:
-                if cfg["use_tls"]:
-                    smtp.starttls(context=ssl.create_default_context())
-                smtp.login(cfg["user"], cfg["password"])
-                smtp.send_message(msg)
+        _send_email_message(msg, cfg)
         logging.info("Sent user info email for %s", chat_id)
         return True
     except Exception as e:
@@ -548,29 +625,31 @@ def finalize_letter(cid):
             username = resp.get('full_name', 'unknown')
             email_body = f"A new application letter was generated.\n\nUser ID: {cid}\nUsername: {username}\nTimestamp: {timestamp}\n\nLetter:\n{letter}"
             msg = EmailMessage()
-            recipient = "tade2024bdugit@gmail.com"
+            recipient = (os.getenv("ADMIN_EMAIL_RECIPIENT") or "tade2024bdugit@gmail.com").strip()
             msg["Subject"] = f"New Application Letter: {username} ({cid})"
             cfg = _get_smtp_config()
-            msg["From"] = cfg.get("user")
+            if cfg.get("user"):
+                msg["From"] = cfg.get("user")
             msg["To"] = recipient
             msg.set_content(email_body)
 
             if cfg.get("user") and cfg.get("password"):
                 try:
-                    if cfg.get("use_ssl"):
-                        context = ssl.create_default_context()
-                        with smtplib.SMTP_SSL(cfg["host"], cfg["port"], context=context) as smtp:
-                            smtp.login(cfg["user"], cfg["password"])
-                            smtp.send_message(msg)
-                    else:
-                        with smtplib.SMTP(cfg["host"], cfg["port"]) as smtp:
-                            if cfg.get("use_tls"):
-                                smtp.starttls(context=ssl.create_default_context())
-                            smtp.login(cfg["user"], cfg["password"])
-                            smtp.send_message(msg)
-                    logging.info(f"Sent application letter email for {resp['full_name']}")
+                    try:
+                        with open(path, "rb") as f:
+                            msg.add_attachment(
+                                f.read(),
+                                maintype="application",
+                                subtype="pdf",
+                                filename=pdfname,
+                            )
+                    except Exception as e:
+                        logging.error("Failed attaching PDF for %s: %s", cid, e)
+
+                    _send_email_message(msg, cfg)
+                    logging.info("Sent application letter email for %s", cid)
                 except Exception as e:
-                    logging.error(f"Failed to send application letter email for {resp['full_name']}: {e}")
+                    logging.error("Failed to send application letter email for %s: %s", cid, e)
             else:
                 logging.warning("Email credentials not set; skipping sending application letter for %s", cid)
         except Exception as e:
@@ -617,6 +696,11 @@ def configure_bot():
 
 # === Entry point ===
 if __name__ == '__main__':
+    if _SMTP_TEST_MODE:
+        ok, message = smtp_self_test()
+        print(message)
+        raise SystemExit(0 if ok else 1)
+
     print(f"🚀 Starting bot in {ENVIRONMENT.upper()} mode")
     configure_bot()
 

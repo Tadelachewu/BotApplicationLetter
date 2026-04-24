@@ -364,7 +364,8 @@ def call_openrouter(prompt: str) -> str:
 
     Environment variables:
     - OPENROUTER_API_KEY (required)
-    - OPENROUTER_MODEL (optional, default deepseek/deepseek-r1-0528:free)
+    - OPENROUTER_MODEL (optional, default openai/gpt-oss-120b:free)
+    - OPENROUTER_MODEL_FALLBACKS (optional, comma-separated model ids to try if the primary model has no endpoints)
     - OPENROUTER_REQUEST_TIMEOUT_SECONDS (optional)
     - OPENROUTER_REFERER, OPENROUTER_XTITLE (optional headers)
     """
@@ -372,7 +373,14 @@ def call_openrouter(prompt: str) -> str:
     if not api_key or api_key.lower().startswith("your_"):
         raise LLMAuthError("OPENROUTER_API_KEY is missing or placeholder", kind="auth", provider="openrouter")
 
-    model = (os.getenv("OPENROUTER_MODEL") or "deepseek/deepseek-r1-0528:free").strip()
+    default_model = "openai/gpt-oss-120b:free"
+    model = (os.getenv("OPENROUTER_MODEL") or default_model).strip()
+    fallback_raw = (os.getenv("OPENROUTER_MODEL_FALLBACKS") or "").strip()
+    fallback_models = [m.strip() for m in fallback_raw.split(",") if m.strip()] if fallback_raw else []
+    models_to_try = []
+    for m in [model, *fallback_models, default_model]:
+        if m and m not in models_to_try:
+            models_to_try.append(m)
     timeout = float(os.getenv("OPENROUTER_REQUEST_TIMEOUT_SECONDS", "30"))
 
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -396,41 +404,54 @@ def call_openrouter(prompt: str) -> str:
         "temperature": 0.4,
     }
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-    data = _get_json_safely(resp)
+    last_http_error = None
+    for model_to_try in models_to_try:
+        payload["model"] = model_to_try
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        data = _get_json_safely(resp)
 
-    if resp.status_code in (401, 403):
-        msg = (data.get("error") or {}).get("message") or "Forbidden/Unauthorized"
-        raise LLMAuthError(msg, kind="auth", provider="openrouter")
+        if resp.status_code in (401, 403):
+            msg = (data.get("error") or {}).get("message") or "Forbidden/Unauthorized"
+            raise LLMAuthError(msg, kind="auth", provider="openrouter")
 
-    if resp.status_code == 429:
-        err = data.get("error") or {}
-        err_type = str(err.get("type") or "").lower()
-        err_code = str(err.get("code") or "").lower()
-        msg = str(err.get("message") or "Too Many Requests")
-        if "insufficient" in err_type or "insufficient" in err_code or "quota" in msg.lower():
+        if resp.status_code == 429:
+            err = data.get("error") or {}
+            err_type = str(err.get("type") or "").lower()
+            err_code = str(err.get("code") or "").lower()
+            msg = str(err.get("message") or "Too Many Requests")
+            if "insufficient" in err_type or "insufficient" in err_code or "quota" in msg.lower():
+                raise LLMQuotaError(msg, kind="quota", provider="openrouter")
+            raise LLMRateLimitError(msg, kind="rate_limit", provider="openrouter")
+
+        if resp.status_code == 402:
+            msg = (data.get("error") or {}).get("message") or "Payment required"
             raise LLMQuotaError(msg, kind="quota", provider="openrouter")
-        raise LLMRateLimitError(msg, kind="rate_limit", provider="openrouter")
 
-    if resp.status_code == 402:
-        msg = (data.get("error") or {}).get("message") or "Payment required"
-        raise LLMQuotaError(msg, kind="quota", provider="openrouter")
+        try:
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            msg = (data.get("error") or {}).get("message") or str(e)
+            msg_l = str(msg).lower()
+            if (
+                len(models_to_try) > 1
+                and model_to_try != models_to_try[-1]
+                and ("no endpoints found" in msg_l or "no endpoints" in msg_l or "no suitable endpoints" in msg_l)
+            ):
+                last_http_error = msg
+                continue
+            raise LLMProviderError(msg, kind="http_error", provider="openrouter")
 
-    try:
-        resp.raise_for_status()
-    except requests.exceptions.HTTPError as e:
-        msg = (data.get("error") or {}).get("message") or str(e)
-        raise LLMProviderError(msg, kind="http_error", provider="openrouter")
+        choices = data.get("choices") or []
+        if not choices:
+            raise LLMProviderError("Empty response", kind="empty", provider="openrouter")
 
-    choices = data.get("choices") or []
-    if not choices:
-        raise LLMProviderError("Empty response", kind="empty", provider="openrouter")
+        message = choices[0].get("message") or {}
+        text = (message.get("content") or "").strip()
+        if not text:
+            raise LLMProviderError("Empty content", kind="empty", provider="openrouter")
+        return text
 
-    message = choices[0].get("message") or {}
-    text = (message.get("content") or "").strip()
-    if not text:
-        raise LLMProviderError("Empty content", kind="empty", provider="openrouter")
-    return text
+    raise LLMProviderError(str(last_http_error or "No endpoints found for configured OpenRouter model(s)"), kind="config", provider="openrouter")
 
 
 _PROVIDER_CALLS = {
